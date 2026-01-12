@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mediagent
+  labels:
+    app: mediagent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mediagent
+  template:
+    metadata:
+      labels:
+        app: mediagent
+    spec:
+      serviceAccountName: mediagent-sa
+      containers:
+      - name: mediagent
+        image: gcr.io/mediagent-demo/mediagent:latest
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: GCP_PROJECT_ID
+          value: "mediagent-demo"
+        - name: GCP_REGION
+          value: "us-central1"
+        - name: LOG_LEVEL
+          value: "INFO"
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        volumeMounts:
+        - name: data
+          mountPath: /app/data
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mediagent-sa
+  annotations:
+    iam.gke.io/gcp-service-account: mediagent@mediagent-demo.iam.gserviceaccount.com
