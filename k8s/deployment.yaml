@@ -17,13 +17,13 @@ spec:
       serviceAccountName: mediagent-sa
       containers:
       - name: mediagent
-        image: gcr.io/mediagent-demo/mediagent:latest
+        image: gcr.io/YOUR_PROJECT_ID/mediagent:latest
         ports:
         - containerPort: 8000
           name: http
         env:
         - name: GCP_PROJECT_ID
-          value: "mediagent-demo"
+          value: "YOUR_PROJECT_ID"
         - name: GCP_REGION
           value: "us-central1"
         - name: LOG_LEVEL
@@ -63,4 +63,4 @@ kind: ServiceAccount
 metadata:
   name: mediagent-sa
   annotations:
-    iam.gke.io/gcp-service-account: mediagent@mediagent-demo.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: mediagent@YOUR_PROJECT_ID.iam.gserviceaccount.com
