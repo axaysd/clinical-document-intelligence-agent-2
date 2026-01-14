@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     gcp_location: str = "us-central1"
     
     # Vertex AI Configuration
-    vertex_model: str = "gemini-1.5-pro"
+    vertex_model: str = "gemini-2.0-flash"
     vertex_embedding_model: str = "text-embedding-004"
     vertex_temperature: float = 0.1
     vertex_max_tokens: int = 2048

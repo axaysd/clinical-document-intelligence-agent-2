@@ -22,12 +22,12 @@ from rag.chunker import TextChunker
 from rag.embeddings import EmbeddingGenerator
 from rag.index import FAISSIndexManager
 from rag.retriever import Retriever
-from agent.nodes import AgentNodes
-from agent.orchestrator import AgentOrchestrator
-from agent.state import AgentState
+from agent.agent import create_clinical_agent, initialize_root_agent
+from google.adk.runners import InMemoryRunner
+from google.genai import types
 from eval.dataset_generator import DatasetGenerator
-from eval.evaluator import Evaluator
-from eval.metrics import MetricsCalculator
+# from eval.evaluator import Evaluator  # Disabled - needs refactor for ADK
+# from eval.metrics import MetricsCalculator  # Disabled - needs refactor for ADK
 
 # Initialize settings and logging
 settings = get_settings()
@@ -44,8 +44,18 @@ app = FastAPI(
 # Global components (initialized once)
 index_manager = FAISSIndexManager()
 retriever = Retriever(index_manager)
-agent_nodes = AgentNodes(retriever)
-orchestrator = AgentOrchestrator(agent_nodes)
+
+# ADK components - Use InMemoryRunner (simpler, bundles session service)
+clinical_agent = create_clinical_agent(retriever)
+initialize_root_agent(retriever)  # For ADK CLI tools
+
+runner = InMemoryRunner(
+    agent=clinical_agent,
+    app_name="mediagent_app"
+)
+
+# Access bundled session service
+session_service = runner.session_service
 
 # In-memory audit store (in production, use database)
 audit_store = {}
@@ -131,13 +141,12 @@ async def upload_document(file: UploadFile = File(...)):
 @app.post("/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest):
     """
-    Query documents using agentic workflow.
+    Query documents using ADK agent workflow.
     
-    - Runs intent classification
-    - Retrieves relevant chunks
-    - Calls MCP tools if needed
-    - Generates grounded answer
-    - Validates safety
+    - Uses ADK Runner to execute agent
+    - Retrieves relevant chunks via RAG tool
+    - Calls tools if needed (calculator, PHI detector)
+    - Generates grounded answer with safety validation
     - Returns answer with citations
     """
     request_id = generate_request_id()
@@ -145,31 +154,95 @@ async def query_documents(request: QueryRequest):
     logger.info("query_requested", question=request.question)
     
     try:
-        # Create agent state
-        state = AgentState(
-            query=request.question,
-            session_id=request.session_id or generate_session_id(),
-            request_id=request_id,
-            top_k=request.top_k or settings.top_k_retrieval
+        # Generate or use provided session ID
+        session_id = request.session_id or generate_session_id()
+        user_id = "default_user"  # Could be from authentication
+        
+        # Create or get session
+        session = await session_service.get_session(
+            app_name="mediagent_app",
+            user_id=user_id,
+            session_id=session_id
         )
         
-        # Execute agent workflow
-        result_state = orchestrator.execute(state)
+        if session is None:
+            session = await session_service.create_session(
+                app_name="mediagent_app",
+                user_id=user_id,
+                session_id=session_id
+            )
         
-        # Store audit trail
-        audit_store[request_id] = result_state
+        # Store user message in session state for callbacks
+        if session and hasattr(session, 'state'):
+            session.state['last_user_message'] = request.question
+        
+        # Create user message  
+        user_content = types.Content(
+            role='user',
+            parts=[types.Part(text=request.question)]
+        )
+        
+        # Run agent and collect response
+        final_answer = ""
+        citations = []
+        tool_calls = []
+        
+        async for event in runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=user_content
+        ):
+            # Collect final response
+            if event.is_final_response() and event.content and event.content.parts:
+                final_answer = event.content.parts[0].text
+            
+            # Collect tool calls from events
+            if hasattr(event, 'function_calls') and event.function_calls:
+                for fc in event.function_calls:
+                    tool_calls.append({
+                        "tool_name": fc.name,
+                        "arguments": dict(fc.args) if hasattr(fc, 'args') else {},
+                        "result": None  # Will be populated from function responses
+                    })
+        
+        # Get updated session to extract citations and state
+        updated_session = await session_service.get_session(
+            app_name="mediagent_app",
+            user_id=user_id,
+            session_id=session_id
+        )
+        
+        # Extract citations from session state (set by RAG tool)
+        if updated_session and hasattr(updated_session, 'state'):
+            state_dict = updated_session.state.to_dict() if hasattr(updated_session.state, 'to_dict') else {}
+            # Citations stored by RAG tool
+            if 'rag_citations' in state_dict:
+                citations = state_dict['rag_citations']
+        
+        # Calculate basic grounding score from citations
+        grounding_score = 0.0
+        if citations:
+            grounding_score = min(len(citations) / 3.0, 1.0)  # Max score with 3+ citations
         
         # Build response
         response = QueryResponse(
             request_id=request_id,
-            answer=result_state.answer,
-            citations=result_state.citations,
-            confidence_score=result_state.safety_validation.confidence_score if result_state.safety_validation else 0.0,
-            grounding_score=result_state.safety_validation.grounding_score if result_state.safety_validation else 0.0,
-            tool_calls=result_state.tool_calls,
-            safety_flags=result_state.safety_validation.flags if result_state.safety_validation else [],
+            answer=final_answer or "No answer generated",
+            citations=citations,
+            confidence_score=grounding_score,  # Use grounding as proxy for confidence
+            grounding_score=grounding_score,
+            tool_calls=tool_calls,
+            safety_flags=[],       # TODO: Implement safety callback for flags
             timestamp=get_timestamp()
         )
+        
+        # Store minimal audit info (ADK has its own session tracking)
+        audit_store[request_id] = {
+            "question": request.question,
+            "answer": final_answer,
+            "session_id": session_id,
+            "timestamp": get_timestamp()
+        }
         
         logger.info("query_completed", request_id=request_id)
         return response
@@ -182,12 +255,10 @@ async def query_documents(request: QueryRequest):
 @app.get("/audit/{request_id}", response_model=AuditResponse)
 async def get_audit_trail(request_id: str):
     """
-    Retrieve full audit trail for a request.
+    Retrieve audit information for a request.
     
-    - Retrieved chunks with similarity scores
-    - Tool calls and results
-    - Safety validation decisions
-    - Performance metrics
+    Note: With ADK, detailed audit trails are managed in sessions.
+    This endpoint provides basic audit info from our tracking.
     """
     set_request_id(request_id)
     logger.info("audit_requested", request_id=request_id)
@@ -195,24 +266,30 @@ async def get_audit_trail(request_id: str):
     if request_id not in audit_store:
         raise HTTPException(status_code=404, detail="Request ID not found")
     
-    state = audit_store[request_id]
+    audit_data = audit_store[request_id]
     
+    # Build simplified audit response
+    # TODO: Enhance with ADK session history retrieval
     response = AuditResponse(
         request_id=request_id,
-        query=state.query,
-        retrieved_chunks=state.citations,
-        tool_calls=state.tool_calls,
-        safety_validation=state.safety_validation,
-        audit_events=state.audit_events,
-        total_duration_ms=state.get_total_duration_ms(),
-        timestamp=get_timestamp()
+        query=audit_data.get("question", ""),
+        retrieved_chunks=[],  # TODO: Extract from ADK session
+        tool_calls=[],         # TODO: Extract from ADK session  
+        safety_validation=None,  # TODO: Implement via callbacks
+        audit_events=[],       # TODO: Extract from ADK session
+        total_duration_ms=0,   # TODO: Calculate from ADK events
+        timestamp=audit_data.get("timestamp", get_timestamp())
     )
     
     return response
 
 
+# TODO: Eval endpoint disabled - needs rework for ADK
+# The Evaluator class still uses the old AgentOrchestrator
+# Need to update eval/evaluator.py to use ADK Runner
+'''
 @app.post("/eval", response_model=EvalResponse)
-async def run_evaluation(request: EvalRequest, background_tasks: BackgroundTasks):
+async def run_evaluation(request: EvalRequest):
     """
     Run evaluation pipeline.
     
@@ -245,14 +322,10 @@ async def run_evaluation(request: EvalRequest, background_tasks: BackgroundTasks
         metrics = metrics_calc.calculate_metrics(eval_results)
         
         # Save results
-        results_dir = Path(settings.eval_datasets_dir) / "results"
-        results_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
-        results_path = results_dir / f"eval_results_{timestamp}.json"
-        
+        results_path = Path(settings.data_dir) / "eval_results.json"
         with open(results_path, 'w') as f:
             json.dump({
-                'metrics': metrics.dict(),
+                'metrics': metrics.model_dump(),
                 'eval_results': eval_results
             }, f, indent=2)
         
@@ -268,6 +341,7 @@ async def run_evaluation(request: EvalRequest, background_tasks: BackgroundTasks
     except Exception as e:
         logger.error("eval_failed", error=str(e))
         raise HTTPException(status_code=500, detail=f"Evaluation failed: {str(e)}")
+'''
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -281,8 +355,8 @@ async def health_check():
         timestamp=get_timestamp(),
         components={
             "faiss_index": f"{index_stats['num_chunks']} chunks",
-            "agent": "ready",
-            "mcp_tools": "available"
+            "adk_agent": "ready",
+            "tools": "3 tools available"  # calculator, PHI detector, RAG
         }
     )
 

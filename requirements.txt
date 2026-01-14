@@ -4,13 +4,14 @@ uvicorn[standard]>=0.27.0
 python-multipart>=0.0.6
 
 # Google Cloud and Vertex AI
+google-adk
 google-cloud-aiplatform>=1.38.0
 google-auth>=2.27.0
 vertexai>=1.38.0
 
 # Vector database
 faiss-cpu>=1.7.4
-numpy>=1.24.0,<2.0.0
+# numpy>=1.24.0,<2.0.0
 
 # PDF processing
 PyPDF2>=3.0.0
