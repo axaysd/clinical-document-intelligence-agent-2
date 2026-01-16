@@ -6,6 +6,7 @@ Replaces custom orchestrator with Google ADK LlmAgent.
 from typing import Dict, Any, Optional
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
+from google.adk.tools.tool_context import ToolContext
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -196,7 +197,7 @@ def phi_detector_tool(text: str) -> Dict[str, Any]:
     }
 
 
-def rag_retrieval_tool(query: str, top_k: int = 3, retriever: Retriever = None) -> Dict[str, Any]:
+def rag_retrieval_tool(query: str, top_k: int = 3, retriever: Retriever = None, tool_context: ToolContext = None) -> Dict[str, Any]:
     """
     Retrieve relevant document chunks for a query using RAG.
     
@@ -204,6 +205,7 @@ def rag_retrieval_tool(query: str, top_k: int = 3, retriever: Retriever = None) 
         query: User question to retrieve context for
         top_k: Number of top chunks to retrieve
         retriever: Retriever instance (passed via closure)
+        tool_context: ADK ToolContext for storing state (injected by ADK)
         
     Returns:
         Dictionary with 'context' (formatted text) and 'citations' (list of citation objects)
@@ -231,15 +233,26 @@ def rag_retrieval_tool(query: str, top_k: int = 3, retriever: Retriever = None) 
                 "chunk_id": c.chunk_id,
                 "document_id": c.document_id,
                 "similarity_score": c.similarity_score,
+                "snippet": retriever.get_chunk_text(c.chunk_id)[:200],
                 "page_number": c.page_number
             }
             for c in citations
         ]
         
+        # Calculate max similarity score for grounding
+        max_similarity = max((c.similarity_score for c in citations), default=0.0)
+        
+        # Store in session state for main.py to extract
+        if tool_context and hasattr(tool_context, 'state'):
+            tool_context.state['rag_citations'] = citations_data
+            tool_context.state['max_similarity_score'] = max_similarity
+            logger.info("citations_stored_in_state", count=len(citations_data), max_sim=max_similarity)
+        
         return {
             "context": context,
             "citations": citations_data,
             "num_citations": len(citations),
+            "max_similarity_score": max_similarity,
             "error": None
         }
     
@@ -262,8 +275,9 @@ def create_clinical_agent(retriever: Retriever) -> LlmAgent:
     """
     
     # Create RAG tool with retriever bound via closure
-    def rag_tool(query: str, top_k: int = 3) -> Dict[str, Any]:
-        return rag_retrieval_tool(query, top_k, retriever)
+    # Note: tool_context is injected by ADK automatically
+    def rag_tool(query: str, top_k: int = 3, tool_context: ToolContext = None) -> Dict[str, Any]:
+        return rag_retrieval_tool(query, top_k, retriever, tool_context)
     
     # Update docstring for ADK
     rag_tool.__doc__ = """Retrieve relevant clinical document context for answering questions.

@@ -212,17 +212,28 @@ async def query_documents(request: QueryRequest):
             session_id=session_id
         )
         
-        # Extract citations from session state (set by RAG tool)
+        # Extract citations from session state (set by RAG tool via ToolContext)
+        grounding_score = 0.0
         if updated_session and hasattr(updated_session, 'state'):
-            state_dict = updated_session.state.to_dict() if hasattr(updated_session.state, 'to_dict') else {}
+            state_dict = updated_session.state if isinstance(updated_session.state, dict) else {}
+            if hasattr(updated_session.state, 'to_dict'):
+                state_dict = updated_session.state.to_dict()
+            
             # Citations stored by RAG tool
             if 'rag_citations' in state_dict:
                 citations = state_dict['rag_citations']
+                logger.info("citations_extracted", count=len(citations))
+            
+            # Use max similarity score for grounding (more accurate than count)
+            if 'max_similarity_score' in state_dict:
+                grounding_score = state_dict['max_similarity_score']
+                logger.info("grounding_score_from_similarity", score=grounding_score)
         
-        # Calculate basic grounding score from citations
-        grounding_score = 0.0
-        if citations:
-            grounding_score = min(len(citations) / 3.0, 1.0)  # Max score with 3+ citations
+        # Fallback: if still no grounding score but have citations, calculate from them
+        if grounding_score == 0.0 and citations:
+            similarity_scores = [c.get('similarity_score', 0) for c in citations if isinstance(c, dict)]
+            if similarity_scores:
+                grounding_score = max(similarity_scores)
         
         # Build response
         response = QueryResponse(
@@ -358,6 +369,126 @@ async def health_check():
             "adk_agent": "ready",
             "tools": "3 tools available"  # calculator, PHI detector, RAG
         }
+    )
+
+
+# ==================== Tool Endpoints ====================
+# Direct access to tools for testing (also used internally by agent)
+
+from pydantic import BaseModel, Field
+from typing import Optional, List, Any
+from agent.agent import calculator_tool, phi_detector_tool
+
+
+class CalculatorRequest(BaseModel):
+    """Request for calculator tool."""
+    operation: str = Field(..., description="One of: add, subtract, multiply, divide")
+    a: float = Field(..., description="First operand")
+    b: float = Field(..., description="Second operand")
+
+
+class PHIDetectorRequest(BaseModel):
+    """Request for PHI detector tool."""
+    text: str = Field(..., description="Text to scan for PHI/PII")
+
+
+class ToolResponse(BaseModel):
+    """Generic tool response."""
+    success: bool
+    result: Optional[Any] = None
+    error: Optional[str] = None
+
+
+@app.get("/tools", tags=["Tools"])
+async def list_tools():
+    """
+    List all available tools.
+    
+    Returns the tools that can be called directly or used by the agent.
+    """
+    return {
+        "tools": [
+            {
+                "name": "calculator",
+                "endpoint": "/tools/calculator",
+                "description": "Perform basic arithmetic: add, subtract, multiply, divide",
+                "parameters": ["operation", "a", "b"]
+            },
+            {
+                "name": "phi_detector",
+                "endpoint": "/tools/phi_detector",
+                "description": "Detect PHI/PII in text (email, phone, SSN, MRN, DOB)",
+                "parameters": ["text"]
+            },
+            {
+                "name": "rag_retrieval",
+                "endpoint": "(internal only - use /query)",
+                "description": "Retrieve relevant document chunks for a query",
+                "parameters": ["query", "top_k"]
+            }
+        ]
+    }
+
+
+@app.post("/tools/calculator", response_model=ToolResponse, tags=["Tools"])
+async def call_calculator(request: CalculatorRequest):
+    """
+    Call the calculator tool directly.
+    
+    Performs basic arithmetic operations.
+    
+    **Operations:**
+    - `add`: a + b
+    - `subtract`: a - b
+    - `multiply`: a * b
+    - `divide`: a / b (returns error if b is 0)
+    
+    **Example:**
+    ```json
+    {"operation": "multiply", "a": 70, "b": 0.5}
+    ```
+    """
+    logger.info("direct_calculator_call", operation=request.operation, a=request.a, b=request.b)
+    
+    result = calculator_tool(request.operation, request.a, request.b)
+    
+    if result.get("error"):
+        return ToolResponse(success=False, result=result.get("result"), error=result["error"])
+    
+    return ToolResponse(success=True, result=result["result"], error=None)
+
+
+@app.post("/tools/phi_detector", response_model=ToolResponse, tags=["Tools"])
+async def call_phi_detector(request: PHIDetectorRequest):
+    """
+    Call the PHI detector tool directly.
+    
+    Scans text for Protected Health Information (PHI) and Personally Identifiable Information (PII).
+    
+    **Detected patterns:**
+    - Email addresses
+    - Phone numbers (xxx-xxx-xxxx format)
+    - Social Security Numbers (xxx-xx-xxxx)
+    - Medical Record Numbers (MRN: xxxxxx)
+    - Dates of Birth (DOB: xx/xx/xxxx)
+    
+    **Example:**
+    ```json
+    {"text": "Patient email: john@example.com, SSN: 123-45-6789"}
+    ```
+    """
+    logger.info("direct_phi_detector_call", text_length=len(request.text))
+    
+    result = phi_detector_tool(request.text)
+    
+    return ToolResponse(
+        success=True,
+        result={
+            "has_phi": result["has_phi"],
+            "detected_types": result["detected_types"],
+            "count": result["count"]
+        },
+        error=result.get("error")
     )
 
 
