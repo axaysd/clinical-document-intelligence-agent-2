@@ -1,8 +1,33 @@
 # Clinical Document Intelligence Agent
 
-Production-grade **Agentic RAG** system for clinical/pharma document question-answering with tool calling, safety validation, and evaluation pipelines.
+<div align="center">
 
-![Status](https://img.shields.io/badge/status-MVP-blue) ![Python](https://img.shields.io/badge/python-3.11-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+**Production-grade Agentic RAG system for clinical/pharma document Q&A**
+
+[![Status](https://img.shields.io/badge/status-MVP-blue)](https://github.com/axaysd/clinical-document-intelligence-agent)
+[![Python](https://img.shields.io/badge/python-3.11-blue)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-00a393)](https://fastapi.tiangolo.com/)
+[![Docker](https://img.shields.io/badge/Docker-ready-2496ED)](https://www.docker.com/)
+[![GKE](https://img.shields.io/badge/GKE-deployable-4285F4)](https://cloud.google.com/kubernetes-engine)
+
+[Features](#-key-features) • [Quick Start](#-quick-start) • [Architecture](#️-architecture-overview) • [Deployment](#-docker-deployment) • [Cost Estimation](#-cost-estimation)
+
+</div>
+
+---
+
+## 📋 Overview
+
+A production-ready **Agentic RAG** system that combines retrieval-augmented generation with intelligent agent workflows for clinical document analysis. Built with Google Vertex AI, FAISS vector search, MCP tool integration, and comprehensive safety validation.
+
+**Key Capabilities:**
+- 🤖 Multi-stage agent workflow with intent classification and tool calling
+- 📚 RAG pipeline with PDF processing, chunking, and vector search
+- 🛡️ Multi-layer safety validation (prompt injection, PHI masking, grounding)
+- 📊 Automated evaluation with LLM-as-judge metrics
+- 🔍 Full audit trail and structured logging
+- ☸️ Production deployment on Google Kubernetes Engine
 
 ---
 
@@ -136,11 +161,47 @@ MediAgent/
 
 ### Prerequisites
 
-- **Python 3.11+**
-- **Google Cloud Project** with Vertex AI enabled
-- **Service Account** with permissions:
-  - `aiplatform.endpoints.predict`
-  - `aiplatform.models.predict`
+#### Required Software
+- **Python 3.11+** - [Download](https://www.python.org/downloads/)
+- **Docker Desktop** - [Download](https://www.docker.com/products/docker-desktop)
+- **Google Cloud SDK** - [Install](https://cloud.google.com/sdk/docs/install)
+- **kubectl** (for GKE deployment) - [Install](https://kubernetes.io/docs/tasks/tools/)
+
+#### Google Cloud Setup
+
+1. **Create a GCP Project**
+   ```bash
+   gcloud projects create YOUR_PROJECT_ID
+   gcloud config set project YOUR_PROJECT_ID
+   ```
+
+2. **Enable Required APIs**
+   ```bash
+   gcloud services enable aiplatform.googleapis.com
+   gcloud services enable artifactregistry.googleapis.com
+   gcloud services enable container.googleapis.com
+   ```
+
+3. **Set Up Authentication**
+   ```bash
+   gcloud auth application-default login
+   ```
+
+4. **Create Service Account** (for production deployment)
+   ```bash
+   gcloud iam service-accounts create mediagent
+   
+   gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+     --member="serviceAccount:mediagent@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+     --role="roles/aiplatform.user"
+   ```
+
+#### Local Development Setup
+
+**Minimum Requirements:**
+- 8GB RAM (16GB recommended)
+- 10GB free disk space
+- Active internet connection for API calls
 
 ### 1. Setup Environment
 
@@ -554,7 +615,7 @@ See `.env.example` for all configurable parameters:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `GCP_PROJECT_ID` | Google Cloud project ID | (required) |
-| `VERTEX_MODEL` | Gemini model name | `gemini-2.0-flash` |
+| `VERTEX_MODEL` | Gemini model name | `gemini-1.5-pro` |
 | `GROUNDING_THRESHOLD` | Min similarity for answers | `0.7` |
 | `CONFIDENCE_THRESHOLD` | Min confidence for answers | `0.6` |
 | `CHUNK_SIZE` | Characters per chunk | `512` |
@@ -575,6 +636,128 @@ See `.env.example` for all configurable parameters:
 | `/health` | GET | Health check for monitoring |
 
 Full API docs (Swagger): `http://localhost:8000/docs`
+
+---
+
+## 🛠️ Troubleshooting
+
+### Common Issues
+
+#### 1. **ImagePullBackOff** on GKE
+
+**Problem**: Pods fail to pull Docker image from Artifact Registry.
+
+**Solution**:
+```bash
+# Grant Artifact Registry read permissions to compute service account
+gcloud artifacts repositories add-iam-policy-binding gcr.io \
+  --location=us \
+  --member="serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+  --role="roles/artifactregistry.reader"
+
+# Restart deployment
+kubectl rollout restart deployment/mediagent
+```
+
+#### 2. **Quota Exceeded** - SSD Storage
+
+**Problem**: `Insufficient regional quota to satisfy request: resource "SSD_TOTAL_GB"`
+
+**Solution**:
+```bash
+# Use standard persistent disks instead of SSD
+gcloud container clusters create mediagent-cluster \
+  --region us-central1 \
+  --num-nodes 2 \
+  --machine-type e2-standard-2 \
+  --disk-type=pd-standard \
+  --scopes="https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/cloud-platform"
+```
+
+#### 3. **403 Forbidden** - API Not Enabled
+
+**Problem**: `API [container.googleapis.com] not enabled on project`
+
+**Solution**:
+```bash
+# Enable required APIs
+gcloud services enable container.googleapis.com
+gcloud services enable artifactregistry.googleapis.com
+gcloud services enable aiplatform.googleapis.com
+```
+
+#### 4. **Module Not Found** in Docker Container
+
+**Problem**: `ModuleNotFoundError: No module named 'fastapi'`
+
+**Solution**: Ensure Dockerfile uses a virtual environment accessible to the non-root user. See the updated `Dockerfile` in this repo.
+
+#### 5. **PowerShell Line Continuation Errors**
+
+**Problem**: `unrecognized arguments: \` when running gcloud commands
+
+**Solution**: Use backticks (`` ` ``) for line continuation in PowerShell, or run as a single line:
+```powershell
+# Single line (recommended for PowerShell)
+gcloud container clusters create mediagent-cluster --region us-central1 --num-nodes 2 --machine-type e2-standard-2
+```
+
+### Getting Help
+
+- Check logs: `kubectl logs -f deployment/mediagent`
+- Describe pod: `kubectl describe pod POD_NAME`
+- View events: `kubectl get events --sort-by='.lastTimestamp'`
+
+---
+
+## 💰 Cost Estimation
+
+### Google Cloud Platform Costs
+
+#### Development/Testing (Local Docker)
+- **Cost**: $0/hour (runs locally)
+- **Vertex AI API calls**: ~$0.01-0.05 per test session
+- **Recommended for**: Initial development and testing
+
+#### Production Deployment (GKE)
+
+**Hourly Costs:**
+| Resource | Specification | Cost/Hour | Cost/Day |
+|----------|--------------|-----------|----------|
+| GKE Cluster Management | - | $0.10 | $2.40 |
+| Compute Nodes (6 nodes) | e2-standard-2 (2 vCPU, 8GB) | $0.42 | $10.08 |
+| LoadBalancer | External IP | $0.025 | $0.60 |
+| **Total** | | **~$0.55/hour** | **~$13/day** |
+
+**Monthly Estimate**: ~$390/month (24/7 operation)
+
+**Additional Costs:**
+- **Vertex AI Embeddings**: ~$0.025 per 1,000 characters
+- **Gemini API**: ~$0.00025 per 1,000 characters (input)
+- **Artifact Registry Storage**: ~$0.10/GB/month
+- **Egress**: ~$0.12/GB (after free tier)
+
+### Cost Optimization Tips
+
+1. **Use Autopilot GKE** (pay only for pods, not nodes)
+2. **Scale down during off-hours**:
+   ```bash
+   kubectl scale deployment mediagent --replicas=0
+   ```
+3. **Use preemptible nodes** (up to 80% savings)
+4. **Set budget alerts** in GCP Console
+5. **Delete resources when not in use**:
+   ```bash
+   gcloud container clusters delete mediagent-cluster --region us-central1
+   ```
+
+### Free Tier Considerations
+
+- **Vertex AI**: $300 free credit for new GCP accounts
+- **GKE**: $74.40/month free cluster management credit
+- **Artifact Registry**: 0.5 GB free storage
+
+**Estimated cost for a 30-minute demo**: ~$0.30-0.50
 
 ---
 
@@ -616,7 +799,14 @@ Full API docs (Swagger): `http://localhost:8000/docs`
 
 ## 📝 License
 
-MIT License - See LICENSE file for details
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+**MIT License Summary:**
+- ✅ Commercial use allowed
+- ✅ Modification allowed
+- ✅ Distribution allowed
+- ✅ Private use allowed
+- ⚠️ Liability and warranty disclaimer
 
 ---
 
